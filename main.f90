@@ -1,113 +1,84 @@
+
+!## Grid preprocessing (run once, offline)
+!- Load Plot3D `grid.xyz` — read NXI×NETA node coordinates x(j,i), y(j,i)
+!- Compute forward metrics: $x_\xi, x_\eta, y_\xi, y_\eta$ via 2nd-order central differences
+!- Compute Jacobian: $J = x_\xi y_\eta - x_\eta y_\xi$
+!- Compute inverse metrics: $\xi_x, \xi_y, \eta_x, \eta_y$
+!- Compute metric tensor: $g^{11}, g^{22}, g^{12}$
+!- Compute physical spacings: $d\xi_s(j,i)$, $d\eta_s(j,i)$, $\Delta z$ uniform
+!- Validate: J > 0, skewness < 0.15, y+ ~ 1–2, wake cut gap < 1e-6
+!- Estimate dt from min cell size
+
+!## Initialisation (once per run)
+!!- Allocate 3D arrays (NZ, NETA, NXI) for u, v, w, p and temporaries
+!- Set freestream IC: u=cos(AoA), v=sin(AoA), w=0, p=0 at all (k,j,i)
+!- Add small random perturbation over full 3D domain
+!- Zero RK accumulators ru, rv, rw
+!- Compute Poisson eigenvalues: DST-I in ξ (NXI modes), DFT in z (NZ modes)
+!- Create cuFFT plans (batched 1D transforms)
+!- All arrays already on GPU via managed memory
+
+!## Time loop (repeat NSTEPS times)
+
+!### RK3 substeps (inner loop, 3 times per timestep)
+
+!- **Momentum RHS** — OpenACC kernel over (k,j,i) interior
+!  - Contravariant velocities: $U = \xi_x u + \xi_y v$, $V = \eta_x u + \eta_y v$, $W = w$
+!  - Convection u,v,w: 3rd-order upwind in ξ and η (using U,V), central in z (using W)
+!  - Diffusion u,v,w: FD2 central with $g^{11}$, $g^{22}$, $g^{12}$ cross terms, plus $\Delta z^2$ in z
+!  - Pressure gradient in physical space: $\partial p/\partial x = \xi_x \partial p/\partial\xi + \eta_x \partial p/\partial\eta$, $\partial p/\partial z$ central
+!  - RK accumulator update: ru = rka\*ru + RHS\_u (and same for v, w)
+!  - Intermediate velocity: u\* = u + dt\*rkb\*ru (same for v\*, w\*)
+
+!- **Tripping** (first NTRIP steps, first substep only)
+!  - Broadband spanwise-varying forcing near x = TRIP\_X
+!  - Applied to u\* and w\* only
+
+!- **Boundary conditions on u\*, v\*, w\***
+!  - Wall j=1: no-slip, u\*=v\*=w\*=0
+!  - Far field j=NETA: freestream u\*=cos(AoA), v\*=sin(AoA), w\*=0
+!  - Inlet i=1: freestream
+!  - Outlet i=NXI: zero-gradient (copy from i=NXI-1)
+!  - Spanwise k=1,NZ: periodic
+!  - Wake cut i=1/i=NXI: match values across cut
+
+!- **Pressure Poisson solve** (final RK substep only)
+!  - Compute Rhie-Chow face velocities: $\hat{U}_{i+1/2}$, $\hat{V}_{j+1/2}$, $\hat{W}_{k+1/2}$ — interpolate cell velocities to faces with pressure gradient correction to suppress checkerboard
+!  - Compute divergence of u\* using Rhie-Chow face velocities: $\nabla \cdot \mathbf{u}^* / \Delta t$
+!  - Forward transform RHS: DST-I in ξ, DFT in z (cuFFT)
+!  - Spectral division by $(eig\_\xi(i) + eig\_z(k))$ — approximate, uniform eigenvalues
+!  - Iterative metric correction (NPCORR=3 iterations):
+!    - Compute cross-term residual using current φ: $-2g^{12} \partial^2\phi/\partial\xi\partial\eta$
+!    - Add residual to RHS
+!    - Re-solve with forward/inverse FFT
+!  - Inverse transform: IDFT in z, IDST-I in ξ (cuFFT)
+!  - Normalise by FFT scaling factors
+
+!- **Velocity correction**
+!  - $u = u^* - \Delta t (\xi_x \partial\phi/\partial\xi + \eta_x \partial\phi/\partial\eta)$
+!  - $v = v^* - \Delta t (\xi_y \partial\phi/\partial\xi + \eta_y \partial\phi/\partial\eta)$
+!  - $w = w^* - \Delta t \partial\phi/\partial z$
+!  - Pressure update: $p = p + \phi$
+!  - Re-apply BCs on corrected u, v, w
+
+!- **Advance time**: t = t + dt (after all 3 substeps)!
+
+!## Force monitoring (every NPRINT steps)
+!- Download wall pressure from GPU: p(k,1,i)
+!- Z-average wall pressure: $\bar{p}(i) = \frac{1}{N_z}\sum_k p(k,1,i)$
+!- Integrate CL, CD via wall-normal pressure: outward normal from $(\eta_x, \eta_y)$ at j=1
+!- Count CL zero-crossings for Strouhal number estimate
+!- Print step, t, CL, CD to stdout
+
+!## Finalisation
+!- Destroy cuFFT plans
+!- Deallocate all arrays
+!- Print Strouhal number estimate
+
+
 program gfoil36
-  use cufft
   implicit none
-
-
-
-## Grid preprocessing (run once, offline)
-- Load Plot3D `grid.xyz` — read NXI×NETA node coordinates x(j,i), y(j,i)
-- Compute forward metrics: $x_\xi, x_\eta, y_\xi, y_\eta$ via 2nd-order central differences
-- Compute Jacobian: $J = x_\xi y_\eta - x_\eta y_\xi$
-- Compute inverse metrics: $\xi_x, \xi_y, \eta_x, \eta_y$
-- Compute metric tensor: $g^{11}, g^{22}, g^{12}$
-- Compute physical spacings: $d\xi_s(j,i)$, $d\eta_s(j,i)$, $\Delta z$ uniform
-- Validate: J > 0, skewness < 0.15, y+ ~ 1–2, wake cut gap < 1e-6
-- Estimate dt from min cell size
-
-## Initialisation (once per run)
-- Allocate 3D arrays (NZ, NETA, NXI) for u, v, w, p and temporaries
-- Set freestream IC: u=cos(AoA), v=sin(AoA), w=0, p=0 at all (k,j,i)
-- Add small random perturbation over full 3D domain
-- Zero RK accumulators ru, rv, rw
-- Compute Poisson eigenvalues: DST-I in ξ (NXI modes), DFT in z (NZ modes)
-- Create cuFFT plans (batched 1D transforms)
-- All arrays already on GPU via managed memory
-
-## Time loop (repeat NSTEPS times)
-
-### RK3 substeps (inner loop, 3 times per timestep)
-
-- **Momentum RHS** — OpenACC kernel over (k,j,i) interior
-  - Contravariant velocities: $U = \xi_x u + \xi_y v$, $V = \eta_x u + \eta_y v$, $W = w$
-  - Convection u,v,w: 3rd-order upwind in ξ and η (using U,V), central in z (using W)
-  - Diffusion u,v,w: FD2 central with $g^{11}$, $g^{22}$, $g^{12}$ cross terms, plus $\Delta z^2$ in z
-  - Pressure gradient in physical space: $\partial p/\partial x = \xi_x \partial p/\partial\xi + \eta_x \partial p/\partial\eta$, $\partial p/\partial z$ central
-  - RK accumulator update: ru = rka\*ru + RHS\_u (and same for v, w)
-  - Intermediate velocity: u\* = u + dt\*rkb\*ru (same for v\*, w\*)
-
-- **Tripping** (first NTRIP steps, first substep only)
-  - Broadband spanwise-varying forcing near x = TRIP\_X
-  - Applied to u\* and w\* only
-
-- **Boundary conditions on u\*, v\*, w\***
-  - Wall j=1: no-slip, u\*=v\*=w\*=0
-  - Far field j=NETA: freestream u\*=cos(AoA), v\*=sin(AoA), w\*=0
-  - Inlet i=1: freestream
-  - Outlet i=NXI: zero-gradient (copy from i=NXI-1)
-  - Spanwise k=1,NZ: periodic
-  - Wake cut i=1/i=NXI: match values across cut
-
-- **Pressure Poisson solve** (final RK substep only)
-  - Compute Rhie-Chow face velocities: $\hat{U}_{i+1/2}$, $\hat{V}_{j+1/2}$, $\hat{W}_{k+1/2}$ — interpolate cell velocities to faces with pressure gradient correction to suppress checkerboard
-  - Compute divergence of u\* using Rhie-Chow face velocities: $\nabla \cdot \mathbf{u}^* / \Delta t$
-  - Forward transform RHS: DST-I in ξ, DFT in z (cuFFT)
-  - Spectral division by $(eig\_\xi(i) + eig\_z(k))$ — approximate, uniform eigenvalues
-  - Iterative metric correction (NPCORR=3 iterations):
-    - Compute cross-term residual using current φ: $-2g^{12} \partial^2\phi/\partial\xi\partial\eta$
-    - Add residual to RHS
-    - Re-solve with forward/inverse FFT
-  - Inverse transform: IDFT in z, IDST-I in ξ (cuFFT)
-  - Normalise by FFT scaling factors
-
-- **Velocity correction**
-  - $u = u^* - \Delta t (\xi_x \partial\phi/\partial\xi + \eta_x \partial\phi/\partial\eta)$
-  - $v = v^* - \Delta t (\xi_y \partial\phi/\partial\xi + \eta_y \partial\phi/\partial\eta)$
-  - $w = w^* - \Delta t \partial\phi/\partial z$
-  - Pressure update: $p = p + \phi$
-  - Re-apply BCs on corrected u, v, w
-
-- **Advance time**: t = t + dt (after all 3 substeps)
-
-## Force monitoring (every NPRINT steps)
-- Download wall pressure from GPU: p(k,1,i)
-- Z-average wall pressure: $\bar{p}(i) = \frac{1}{N_z}\sum_k p(k,1,i)$
-- Integrate CL, CD via wall-normal pressure: outward normal from $(\eta_x, \eta_y)$ at j=1
-- Count CL zero-crossings for Strouhal number estimate
-- Print step, t, CL, CD to stdout
-
-## Finalisation
-- Destroy cuFFT plans
-- Deallocate all arrays
-- Print Strouhal number estimate
-
-
-
-
-!=============================================================================
-! kernel.f90  —  Time-stepping kernel for 3D incompressible NS on a C-grid
-!
-! Assumptions:
-!   - x(i,j), y(i,j) already loaded (placeholder — replace with grid reader)
-!   - Metrics precomputed from x,y
-!   - Poisson solve is a placeholder subroutine — replace with cuFFT version
-!   - All arrays dimensioned (NI, NJ, NK): i=xi, j=eta, k=zeta
-!   - Collocated grid + Rhie-Chow face velocity interpolation
-!   - Low-storage RK3 (Williamson 1980)
-!   - 3rd-order upwind convection, 2nd-order central diffusion
-!   - OpenACC managed memory: no explicit data movement needed
-!
-! Compile (CPU, for debugging):
-!   gfortran -O2 -o kernel kernel.f90
-!
-! Compile (GPU):
-!   nvfortran -O3 -acc=gpu -gpu=cc80,managed -Mcudalib=cufft kernel.f90 -o kernel
-!=============================================================================
-program kernel
-  implicit none
-
-  !---------------------------------------------------------------------------
-  ! PARAMETERS
-  !---------------------------------------------------------------------------
+  ! parameters
   integer, parameter :: nx = 512,       ! xi  (streamwise / C-grid wrap)
   integer, parameter :: ny = 256        ! eta (wall-normal, j=1 wall, j=NJ far)
   integer, parameter :: nz = 128        ! zeta (spanwise, periodic)
@@ -124,9 +95,8 @@ program kernel
   real(8), parameter :: AOA_RAD = AOA * PI / 180d0
   real(8), parameter :: u0      = dcos(AOA_RAD)
   real(8), parameter :: v0      = dsin(AOA_RAD)
-  ! Low-storage RK3 coefficients (Williamson 1980)
-  real(8), parameter :: RKA(3) = [ 0d0,        -17d0/60d0, -5d0/12d0 ]
-  real(8), parameter :: RKB(3) = [ 8d0/15d0,    5d0/12d0,   3d0/4d0  ]
+  real(8), parameter :: rka(3) = [ 0d0,        -17d0/60d0, -5d0/12d0 ]
+  real(8), parameter :: rkb(3) = [ 8d0/15d0,    5d0/12d0,   3d0/4d0  ]
   real(8) :: xg(nx,ny), yg(nx,ny)
   real(8) :: xi_x(nx,ny), xi_y(nx,ny)   ! d(xi)/dx,  d(xi)/dy
   real(8) :: et_x(nx,ny), et_y(nx,ny)   ! d(eta)/dx, d(eta)/dy
@@ -141,7 +111,7 @@ program kernel
   real(8) :: ru(NI,NJ,NK), rv(NI,NJ,NK), rw(NI,NJ,NK)
   real(8) :: us(nx,ny,nz), vs(nx,ny,nz), ws(nx,ny,nz)
   real(8) :: phi(nx,ny,nz), div(nx,ny,nz)
-  integer :: i, j, k, rk, step, t, dt, rka, rkb
+  integer :: i, j, k, rk, step, t, dt, stage
     ! Metric temporaries inside loops
   real(8) :: x_xi, x_et, y_xi, y_et, jac_loc
   real(8) :: dxip, dxim, detp, detm     ! neighbour spacings
@@ -151,20 +121,16 @@ program kernel
   real(8) :: conv_u, conv_v, conv_w
   real(8) :: diff_u, diff_v, diff_w
   real(8) :: cross_u, cross_v, cross_w
-
   ! Contravariant velocities
   real(8) :: U_con, V_con               ! U = xi_x*u + xi_y*v, V = et_x*u + et_y*v
-
   ! Rhie-Chow face velocities
   real(8) :: Uf_ip, Uf_im               ! contravariant U at i+1/2 and i-1/2
   real(8) :: Vf_jp, Vf_jm               ! contravariant V at j+1/2 and j-1/2
   real(8) :: Wf_kp, Wf_km               ! w at k+1/2 and k-1/2
-
   ! Pressure gradient components
   real(8) :: dp_dx, dp_dy, dp_dz
   real(8) :: dphi_xi, dphi_et, dphi_dz
   real(8) :: dphi_dx, dphi_dy
-
   real(8) :: dmin
 
   !===========================================================================
@@ -277,21 +243,14 @@ program kernel
 
   ! start temporal loop
   do step = 1, NSTEPS
+    ! start RK3 substeps, projection 
+    ! compute rhs = - advection + nu * diffusion
+    ! advection: 3rd-order upwind in xi and eta, 2nd-order central in z
+    ! diffusion:  2nd-order central with metric tensor
     do stage = 1, 3
-
-      rka = RKA(stage)
-      rkb = RKB(stage)
-
-      ! 5a. MOMENTUM RHS
-      !     For each interior cell (i,j,k):
-      !       rhs = - convection + nu * diffusion
-      !     Convection: 3rd-order upwind in xi and eta, 2nd-order central in z
-      !     Diffusion:  2nd-order central with metric tensor
-      !     Pressure gradient excluded here — applied via phi correction later
       do k = 1, nx
         do j = 2, nj-1
           do i = 2, nx-1
-
             ! Local spacings
             dxip = 0.5d0 * (dxi(i,j) + dxi(i+1,j))
             dxim = 0.5d0 * (dxi(i,j) + dxi(i-1,j))
@@ -366,65 +325,41 @@ program kernel
                               * 0.5d0 * DZI
 
             !--- Diffusion of u ---
-            ! xi term: g11 * d2u/dxi2
-            diff_u = g11(i,j) * (u(i+1,j,k) - 2d0*u(i,j,k) + u(i-1,j,k)) &
-                                / dxi(i,j)**2
-            ! eta term: g22 * d2u/deta2
-            diff_u = diff_u + g22(i,j) * (u(i,j+1,k) - 2d0*u(i,j,k) + u(i,j-1,k)) &
-                                         / det(i,j)**2
-            ! z term: d2u/dz2 (Cartesian)
-            diff_u = diff_u + (u(i,j,kp1(k)) - 2d0*u(i,j,k) + u(i,j,km1(k))) * DDZI
-            ! cross metric term: 2*g12 * d2u/dxi/deta
-            cross_u = 2d0 * g12(i,j) * &
-                      (u(i+1,j+1,k) - u(i+1,j-1,k) - u(i-1,j+1,k) + u(i-1,j-1,k)) &
-                      / (4d0 * dxi(i,j) * det(i,j))
+            diff_u =          g11(i,j)*(u(i+1,j,k) - 2d0*u(i,j,k) + u(i-1,j,k))/dxi(i,j)**2                                    ! xi term:  g11 * d2u/dxi2
+            diff_u = diff_u + g22(i,j)*(u(i,j+1,k) - 2d0*u(i,j,k) + u(i,j-1,k))/det(i,j)**2                                    ! eta term: g22 * d2u/deta2
+            diff_u = diff_u + (u(i,j,kp1(k)) - 2d0*u(i,j,k) + u(i,j,km1(k)))*ddzi                                              ! z term: d2u/dz2 (Cartesian)
+            cross_u = 2d0*g12(i,j)*(u(i+1,j+1,k) - u(i+1,j-1,k) - u(i-1,j+1,k) + u(i-1,j-1,k))/(4d0 * dxi(i,j) * det(i,j))     ! cross metric term: 2*g12 * d2u/dxi/deta
             diff_u = diff_u + cross_u
-
-            !--- Diffusion of v (same metric) ---
-            diff_v = g11(i,j) * (v(i+1,j,k) - 2d0*v(i,j,k) + v(i-1,j,k)) &
-                                / dxi(i,j)**2 &
-                   + g22(i,j) * (v(i,j+1,k) - 2d0*v(i,j,k) + v(i,j-1,k)) &
-                                / det(i,j)**2 &
-                   + (v(i,j,kp1(k)) - 2d0*v(i,j,k) + v(i,j,km1(k))) * DDZI
-            cross_v = 2d0 * g12(i,j) * &
-                      (v(i+1,j+1,k) - v(i+1,j-1,k) - v(i-1,j+1,k) + v(i-1,j-1,k)) &
-                      / (4d0 * dxi(i,j) * det(i,j))
+            !--- Diffusion of v ---
+            diff_v =          g11(i,j)*(v(i+1,j,k) - 2d0*v(i,j,k) + v(i-1,j,k))/dxi(i,j)**2 
+            diff_v = diff_v + g22(i,j)*(v(i,j+1,k) - 2d0*v(i,j,k) + v(i,j-1,k))/det(i,j)**2 
+            diff_v = diff_v + (v(i,j,kp1(k)) - 2d0*v(i,j,k) + v(i,j,km1(k)))*ddzi 
+            cross_v = 2d0*g12(i,j)*(v(i+1,j+1,k) - v(i+1,j-1,k) - v(i-1,j+1,k) + v(i-1,j-1,k))/(4d0 * dxi(i,j) * det(i,j))
             diff_v = diff_v + cross_v
-
             !--- Diffusion of w ---
-            diff_w = g11(i,j) * (w(i+1,j,k) - 2d0*w(i,j,k) + w(i-1,j,k)) &
-                                / dxi(i,j)**2 &
-                   + g22(i,j) * (w(i,j+1,k) - 2d0*w(i,j,k) + w(i,j-1,k)) &
-                                / det(i,j)**2 &
-                   + (w(i,j,kp1(k)) - 2d0*w(i,j,k) + w(i,j,km1(k))) * DDZI
-            cross_w = 2d0 * g12(i,j) * &
-                      (w(i+1,j+1,k) - w(i+1,j-1,k) - w(i-1,j+1,k) + w(i-1,j-1,k)) &
-                      / (4d0 * dxi(i,j) * det(i,j))
+            diff_w =          g11(i,j)*(w(i+1,j,k) - 2d0*w(i,j,k) + w(i-1,j,k))/dxi(i,j)**2 
+            diff_w = diff_w + g22(i,j)*(w(i,j+1,k) - 2d0*w(i,j,k) + w(i,j-1,k))/det(i,j)**2 
+            diff_w = diff_w + (w(i,j,kp1(k)) - 2d0*w(i,j,k) + w(i,j,km1(k)))*ddzi 
+            cross_w = 2d0*g12(i,j)*(w(i+1,j+1,k) - w(i+1,j-1,k) - w(i-1,j+1,k) + w(i-1,j-1,k))/(4d0 * dxi(i,j) * det(i,j))
             diff_w = diff_w + cross_w
-
             !--- RHS assembly ---
-            rhs_u = -conv_u + NU * diff_u
-            rhs_v = -conv_v + NU * diff_v
-            rhs_w = -conv_w + NU * diff_w
-
+            rhs_u = -conv_u + nu*diff_u
+            rhs_v = -conv_v + nu*diff_v
+            rhs_w = -conv_w + nu*diff_w
             !--- RK3 accumulator update ---
-            ru(i,j,k) = rka * ru(i,j,k) + rhs_u
-            rv(i,j,k) = rka * rv(i,j,k) + rhs_v
-            rw(i,j,k) = rka * rw(i,j,k) + rhs_w
-
-            !--- Intermediate velocity (no pressure gradient yet) ---
-            us(i,j,k) = u(i,j,k) + dt * rkb * ru(i,j,k)
-            vs(i,j,k) = v(i,j,k) + dt * rkb * rv(i,j,k)
-            ws(i,j,k) = w(i,j,k) + dt * rkb * rw(i,j,k)
-
+            ru(i,j,k) = rka(stage)*ru(i,j,k) + rhs_u
+            rv(i,j,k) = rka(stage)*rv(i,j,k) + rhs_v
+            rw(i,j,k) = rka(stage)*rw(i,j,k) + rhs_w
+            ! compute prijectd velocity u*, v*, w* for Poisson RHS
+            us(i,j,k) = u(i,j,k) + dt*rkb(stage)*ru(i,j,k)
+            vs(i,j,k) = v(i,j,k) + dt*rkb(stage)*rv(i,j,k)
+            ws(i,j,k) = w(i,j,k) + dt*rkb(stage)*rw(i,j,k)
           end do
         end do
       end do
       !$acc end parallel loop
 
-      !-----------------------------------------------------------------------
-      ! 5b. BOUNDARY CONDITIONS ON u*, v*, w*
-      !-----------------------------------------------------------------------
+      ! 5b. Apply BCs on u*, v*, w*
       call apply_bcs(us, vs, ws, NI, NJ, NK, U0, V0)
 
       !-----------------------------------------------------------------------
