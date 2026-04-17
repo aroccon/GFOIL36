@@ -90,37 +90,34 @@ program gfoil36
   real(8), parameter :: PI      = acos(-1d0)
   real(8), parameter :: nu      = 1d0 / RE
   real(8), parameter :: dz      = LZ / dble(NK)
-  real(8), parameter :: dzi     = 1d0 / DZ
-  real(8), parameter :: ddzi    = 1d0 / DZ**2
+  real(8), parameter :: dzi     = 1d0/dz
+  real(8), parameter :: ddzi    = 1d0/dz/fz
   real(8), parameter :: AOA_RAD = AOA * PI / 180d0
   real(8), parameter :: u0      = dcos(AOA_RAD)
   real(8), parameter :: v0      = dsin(AOA_RAD)
   real(8), parameter :: rka(3) = [ 0d0,        -17d0/60d0, -5d0/12d0 ]
   real(8), parameter :: rkb(3) = [ 8d0/15d0,    5d0/12d0,   3d0/4d0  ]
-  real(8) :: xg(nx,ny), yg(nx,ny)
-  real(8) :: xi_x(nx,ny), xi_y(nx,ny)   ! d(xi)/dx,  d(xi)/dy
-  real(8) :: et_x(nx,ny), et_y(nx,ny)   ! d(eta)/dx, d(eta)/dy
-  real(8) :: jac(nx,ny)                  ! Jacobian J = x_xi*y_et - x_et*y_xi
-  real(8) :: g11(nx,ny)                  ! xi_x^2  + xi_y^2
-  real(8) :: g22(nx,ny)                  ! et_x^2  + et_y^2
-  real(8) :: g12(nx,ny)                  ! xi_x*et_x + xi_y*et_y
-  real(8) :: dxi(nx,ny)                  ! physical xi  cell spacing
-  real(8) :: det(nx,ny)                  ! physical eta cell spacing
-  real(8) :: u(nx,ny,nz), v(nx,ny,nz), w(nx,ny,nz)
-  real(8) :: p(nx,ny,nz)
-  real(8) :: ru(NI,NJ,NK), rv(NI,NJ,NK), rw(NI,NJ,NK)
-  real(8) :: us(nx,ny,nz), vs(nx,ny,nz), ws(nx,ny,nz)
-  real(8) :: phi(nx,ny,nz), div(nx,ny,nz)
+  double precision, allocatable :: xg(:,:), yg(:,:)
+  double precision, allocatable :: xi_x(:,:), xi_y(:,:)   ! d(xi)/dx,  d(xi)/dy
+  double precision, allocatable :: et_x(:,:), et_y(:,:)   ! d(eta)/dx, d(eta)/dy
+  double precision, allocatable :: jac(:,:)                ! Jacobian J = x_xi*y_et - x_et*y_xi
+  double precision, allocatable :: g11(:,:)                ! xi_x^2  + xi_y^2
+  double precision, allocatable :: g22(:,:)                ! et_x^2  + et_y^2
+  double precision, allocatable :: g12(:,:)                ! xi_x*et_x + xi_y*et_y
+  double precision, allocatable :: dxi(:,:)                ! physical xi  cell spacing
+  double precision, allocatable :: det(:,:)                ! physical eta cell spacing
+  double precision, allocatable :: u(:,:,:), v(:,:,:), w(:,:,:)
+  double precision, allocatable :: p(:,:,:)
+  double precision, allocatable :: ru(:,:,:), rv(:,:,:), rw(:,:,:)
+  double precision, allocatable :: us(:,:,:), vs(:,:,:), ws(:,:,:)
+  double precision, allocatable :: phi(:,:,:), div(:,:,:)
   integer :: i, j, k, rk, step, t, dt, stage
     ! Metric temporaries inside loops
   real(8) :: x_xi, x_et, y_xi, y_et, jac_loc
   real(8) :: dxip, dxim, detp, detm     ! neighbour spacings
-
   ! RHS components
-  real(8) :: rhs_u, rhs_v, rhs_w
-  real(8) :: conv_u, conv_v, conv_w
-  real(8) :: diff_u, diff_v, diff_w
-  real(8) :: cross_u, cross_v, cross_w
+  double precision :: rhs_u, rhs_v, rhs_w, conv_u, conv_v, conv_w
+  double precision :: diff_u, diff_v, diff_w, cross_u, cross_v, cross_w
   ! Contravariant velocities
   real(8) :: U_con, V_con               ! U = xi_x*u + xi_y*v, V = et_x*u + et_y*v
   ! Rhie-Chow face velocities
@@ -128,10 +125,21 @@ program gfoil36
   real(8) :: Vf_jp, Vf_jm               ! contravariant V at j+1/2 and j-1/2
   real(8) :: Wf_kp, Wf_km               ! w at k+1/2 and k-1/2
   ! Pressure gradient components
-  real(8) :: dp_dx, dp_dy, dp_dz
-  real(8) :: dphi_xi, dphi_et, dphi_dz
-  real(8) :: dphi_dx, dphi_dy
-  real(8) :: dmin
+  double precision :: dp_dx, dp_dy, dp_dz, dphi_xi, dphi_et, dphi_dz, dphi_dx, dphi_dy, dmin
+ 
+
+  ! allocate arrays
+  allocate( xg(nx,ny), yg(nx,ny) )
+  allocate( xi_x(nx,ny), xi_y(nx,ny) )
+  allocate( et_x(nx,ny), et_y(nx,ny) )
+  allocate( jac(nx,ny) )
+  allocate( g11(nx,ny), g22(nx,ny), g12(nx,ny) )
+  allocate( dxi(nx,ny), det(nx,ny) )
+  allocate( u(nx,ny,nz), v(nx,ny,nz), w(nx,ny,nz) )
+  allocate( p(nx,ny,nz) )
+  allocate( ru(NI,NJ,NK), rv(NI,NJ,NK), rw(NI,NJ,NK) )
+  allocate( us(nx,ny,nz), vs(nx,ny,nz), ws(nx,ny,nz) )
+  allocate( phi(nx,ny,nz), div(nx,ny,nz) )
 
   !===========================================================================
   ! 1. PLACEHOLDER GRID  (uniform Cartesian — replace with Construct2D reader)
@@ -205,30 +213,26 @@ program gfoil36
     end do
   end do
 
-  !===========================================================================
   ! 3. TIMESTEP
   !    CFL-limited (ILES: diffusion limit relaxed by implicit numerical diss.)
-  !===========================================================================
   dmin = minval(det(1:NI, 1))   ! smallest first cell height at wall
   dt   = 0.4d0 * dmin / 2d0    ! safety 0.4, Umax ~ 2
 
   write(*,'(A,ES10.3)') '  dt = ', dt
-  write(*,'(A,I0,A,I0,A,I0)') '  Grid: ', NI,' x ',NJ,' x ',NK
+  write(*,'(A,I0,A,I0,A,I0)') '  Grid: ', nx,' x ',ny,' x ',nz
 
-  !===========================================================================
-  ! 4. INITIAL CONDITIONS  (freestream + tiny random perturbation)
-  !===========================================================================
+  ! 4. initialize flow field (freestream + tiny random perturbation)
   call random_seed()
   block
     real(8) :: noise
-    do k = 1, NK
-      do j = 1, NJ
-        do i = 1, NI
-          call random_number(noise)
-          u(i,j,k) = U0 + (noise - 0.5d0) * 1d-3
-          call random_number(noise)
-          v(i,j,k) = V0 + (noise - 0.5d0) * 1d-3
-          call random_number(noise)
+    do k = 1, nz
+      do j = 1, ny
+        do i = 1, nx
+          !call random_number(noise)
+          u(i,j,k) = U0 !+ (noise - 0.5d0) * 1d-3
+          !call random_number(noise)
+          v(i,j,k) = V0 !+ (noise - 0.5d0) * 1d-3
+          !call random_number(noise)
           w(i,j,k) =      (noise - 0.5d0) * 1d-3
           p(i,j,k) = 0d0
           ru(i,j,k) = 0d0
@@ -237,7 +241,6 @@ program gfoil36
         end do
       end do
     end do
-  end block
 
 
 
@@ -261,68 +264,47 @@ program gfoil36
             U_con = xi_x(i,j)*u(i,j,k) + xi_y(i,j)*v(i,j,k)
             V_con = et_x(i,j)*u(i,j,k) + et_y(i,j)*v(i,j,k)
 
-            !--- Convection of u ---
+            !--- advection of u ---
             ! xi direction: 3rd-order upwind
             if (U_con >= 0d0) then
-              conv_u = U_con * ( 2d0*u(i+1,j,k) - 6d0*u(i,j,k) &
-                                +3d0*u(i-1,j,k) + u(i-2,j,k)   ) / (6d0*dxi(i,j))
+              conv_u=U_con*(2d0*u(i+1,j,k)-6d0*u(i,j,k)+3d0*u(i-1,j,k)+u(i-2,j,k))/(6d0*dxi(i,j))
             else
-              conv_u = U_con * (-u(i+2,j,k) + 3d0*u(i+1,j,k)   &
-                                +6d0*u(i,j,k) - 2d0*u(i-1,j,k) ) / (6d0*dxi(i,j)) &
-                       * (-1d0)
+              conv_u=U_con*(-u(i+2,j,k)+3d0*u(i+1,j,k)+6d0*u(i,j,k)-2d0*u(i-1,j,k))/(6d0*dxi(i,j))*(-1d0)
             end if
             ! eta direction: 3rd-order upwind
             if (V_con >= 0d0) then
-              conv_u = conv_u + V_con * ( 2d0*u(i,j+1,k) - 6d0*u(i,j,k) &
-                                         +3d0*u(i,j-1,k) + u(i,j-2,k)   ) / (6d0*det(i,j))
+              conv_u=conv_u+V_con*( 2d0*u(i,j+1,k)-6d0*u(i,j,k)+3d0*u(i,j-1,k)+u(i,j-2,k))/(6d0*det(i,j))
             else
-              conv_u = conv_u + V_con * (-u(i,j+2,k) + 3d0*u(i,j+1,k)   &
-                                         +6d0*u(i,j,k) - 2d0*u(i,j-1,k) ) / (6d0*det(i,j)) &
-                                * (-1d0)
+              conv_u=conv_u+V_con*(-u(i,j+2,k)+3d0*u(i,j+1,k)+6d0*u(i,j,k)-2d0*u(i,j-1,k))/(6d0*det(i,j))*(-1d0)
             end if
             ! z direction: 2nd-order central (periodic)
-            conv_u = conv_u + w(i,j,k) * (u(i,j,kp1(k)) - u(i,j,km1(k))) &
-                              * 0.5d0 * DZI
+            conv_u =conv_u+w(i,j,k)*(u(i,j,kp1(k))-u(i,j,km1(k)))*0.5d0*dzi
 
             !--- Convection of v (same pattern) ---
             if (U_con >= 0d0) then
-              conv_v = U_con * ( 2d0*v(i+1,j,k) - 6d0*v(i,j,k) &
-                                +3d0*v(i-1,j,k) + v(i-2,j,k)   ) / (6d0*dxi(i,j))
+              conv_v=U_con*( 2d0*v(i+1,j,k)-6d0*v(i,j,k)+3d0*v(i-1,j,k)+v(i-2,j,k))/(6d0*dxi(i,j))
             else
-              conv_v = U_con * (-v(i+2,j,k) + 3d0*v(i+1,j,k)   &
-                                +6d0*v(i,j,k) - 2d0*v(i-1,j,k) ) / (6d0*dxi(i,j)) &
-                       * (-1d0)
+              conv_v=U_con*(-v(i+2,j,k)+3d0*v(i+1,j,k)+6d0*v(i,j,k)-2d0*v(i-1,j,k))/(6d0*dxi(i,j))*(-1d0)
             end if
             if (V_con >= 0d0) then
-              conv_v = conv_v + V_con * ( 2d0*v(i,j+1,k) - 6d0*v(i,j,k) &
-                                         +3d0*v(i,j-1,k) + v(i,j-2,k)   ) / (6d0*det(i,j))
+              conv_v=conv_v+V_con*( 2d0*v(i,j+1,k)-6d0*v(i,j,k)+3d0*v(i,j-1,k)+v(i,j-2,k))/(6d0*det(i,j))
             else
-              conv_v = conv_v + V_con * (-v(i,j+2,k) + 3d0*v(i,j+1,k)   &
-                                         +6d0*v(i,j,k) - 2d0*v(i,j-1,k) ) / (6d0*det(i,j)) &
-                                * (-1d0)
+              conv_v=conv_v+V_con*(-v(i,j+2,k)+3d0*v(i,j+1,k)+6d0*v(i,j,k)-2d0*v(i,j-1,k))/(6d0*det(i,j))*(-1d0)
             end if
-            conv_v = conv_v + w(i,j,k) * (v(i,j,kp1(k)) - v(i,j,km1(k))) &
-                              * 0.5d0 * DZI
+            conv_v=conv_v+w(i,j,k)*(v(i,j,kp1(k))-v(i,j,km1(k)))*0.5d0*dzi
 
             !--- Convection of w ---
             if (U_con >= 0d0) then
-              conv_w = U_con * ( 2d0*w(i+1,j,k) - 6d0*w(i,j,k) &
-                                +3d0*w(i-1,j,k) + w(i-2,j,k)   ) / (6d0*dxi(i,j))
+              conv_w=U_con*(2d0*w(i+1,j,k)-6d0*w(i,j,k)+3d0*w(i-1,j,k)+w(i-2,j,k))/(6d0*dxi(i,j))
             else
-              conv_w = U_con * (-w(i+2,j,k) + 3d0*w(i+1,j,k)   &
-                                +6d0*w(i,j,k) - 2d0*w(i-1,j,k) ) / (6d0*dxi(i,j)) &
-                       * (-1d0)
+              conv_w=U_con*(-w(i+2,j,k)+3d0*w(i+1,j,k)+6d0*w(i,j,k)-2d0*w(i-1,j,k))/(6d0*dxi(i,j))*(-1d0)
             end if
             if (V_con >= 0d0) then
-              conv_w = conv_w + V_con * ( 2d0*w(i,j+1,k) - 6d0*w(i,j,k) &
-                                         +3d0*w(i,j-1,k) + w(i,j-2,k)   ) / (6d0*det(i,j))
+              conv_w=conv_w+V_con*(2d0*w(i,j+1,k)-6d0*w(i,j,k)+3d0*w(i,j-1,k)+w(i,j-2,k))/(6d0*det(i,j))
             else
-              conv_w = conv_w + V_con * (-w(i,j+2,k) + 3d0*w(i,j+1,k)   &
-                                         +6d0*w(i,j,k) - 2d0*w(i,j-1,k) ) / (6d0*det(i,j)) &
-                                * (-1d0)
+              conv_w=conv_w+V_con*(-w(i,j+2,k)+3d0*w(i,j+1,k)+6d0*w(i,j,k)-2d0*w(i,j-1,k))/(6d0*det(i,j))*(-1d0)
             end if
-            conv_w = conv_w + w(i,j,k) * (w(i,j,kp1(k)) - w(i,j,km1(k))) &
-                              * 0.5d0 * DZI
+            conv_w=conv_w+w(i,j,k)*(w(i,j,kp1(k))-w(i,j,km1(k)))*0.5d0*dzi
 
             !--- Diffusion of u ---
             diff_u =          g11(i,j)*(u(i+1,j,k) - 2d0*u(i,j,k) + u(i-1,j,k))/dxi(i,j)**2                                    ! xi term:  g11 * d2u/dxi2
@@ -362,56 +344,53 @@ program gfoil36
       ! 5b. Apply BCs on u*, v*, w*
       call apply_bcs(us, vs, ws, NI, NJ, NK, U0, V0)
 
-      !-----------------------------------------------------------------------
-      ! 5c. PRESSURE POISSON (only after final RK substep)
-      !     Solve: laplacian(phi) = (1/dt) * div(u*)
-      !     where div is computed with Rhie-Chow face velocities
-      !-----------------------------------------------------------------------
-      if (rk == 3) then
-
-        !--- Rhie-Chow divergence ---
-        call rhie_chow_div(us, vs, ws, p, phi, div, &
-                           xi_x, xi_y, et_x, et_y, jac, g11, g22, g12, &
-                           dxi, det, NI, NJ, NK, DZI, dt)
-
-        !--- Poisson solve (placeholder) ---
-        call poisson_solve(phi, div, NI, NJ, NK, DZ)
-
-        !--- Velocity correction ---
-        !$acc parallel loop collapse(3) independent &
-        !$acc&   private(dphi_xi, dphi_et, dphi_dz, dphi_dx, dphi_dy)
-        do k = 1, NK
-          do j = 2, NJ-1
-            do i = 2, NI-1
-
-              ! Pressure correction gradient in computational space
-              dphi_xi = (phi(i+1,j,k) - phi(i-1,j,k)) / (2d0 * dxi(i,j))
-              dphi_et = (phi(i,j+1,k) - phi(i,j-1,k)) / (2d0 * det(i,j))
-              dphi_dz = (phi(i,j,kp1(k)) - phi(i,j,km1(k))) * 0.5d0 * DZI
-
-              ! Transform to physical space
-              dphi_dx = xi_x(i,j)*dphi_xi + et_x(i,j)*dphi_et
-              dphi_dy = xi_y(i,j)*dphi_xi + et_y(i,j)*dphi_et
-
-              ! Correct velocity
-              u(i,j,k) = us(i,j,k) - dt * dphi_dx
-              v(i,j,k) = vs(i,j,k) - dt * dphi_dy
-              w(i,j,k) = ws(i,j,k) - dt * dphi_dz
-
-              ! Update pressure
-              p(i,j,k) = p(i,j,k) + phi(i,j,k)
-
-            end do
-          end do
-        end do
-        !$acc end parallel loop
-
-        ! Re-apply BCs on corrected velocity
-        call apply_bcs(u, v, w, NI, NJ, NK, U0, V0)
-
-      end if  ! rk == 3
-
     end do  ! rk loop
+
+    !-----------------------------------------------------------------------
+    ! 5c. PRESSURE POISSON (once per time step, after all RK substeps)
+    !     Solve: laplacian(phi) = (1/dt) * div(u*)
+    !     where div is computed with Rhie-Chow face velocities
+    !-----------------------------------------------------------------------
+
+    !--- Rhie-Chow divergence ---
+    call rhie_chow_div(us, vs, ws, p, phi, div, &
+                       xi_x, xi_y, et_x, et_y, jac, g11, g22, g12, &
+                       dxi, det, NI, NJ, NK, DZI, dt)
+
+    !--- Poisson solve (placeholder) ---
+    call poisson_solve(phi, div, NI, NJ, NK, DZ)
+
+    !--- Velocity correction ---
+    !$acc parallel loop collapse(3) independent &
+    !$acc&   private(dphi_xi, dphi_et, dphi_dz, dphi_dx, dphi_dy)
+    do k = 1, NK
+      do j = 2, NJ-1
+        do i = 2, NI-1
+
+          ! Pressure correction gradient in computational space
+          dphi_xi = (phi(i+1,j,k) - phi(i-1,j,k)) / (2d0 * dxi(i,j))
+          dphi_et = (phi(i,j+1,k) - phi(i,j-1,k)) / (2d0 * det(i,j))
+          dphi_dz = (phi(i,j,kp1(k)) - phi(i,j,km1(k))) * 0.5d0 * DZI
+
+          ! Transform to physical space
+          dphi_dx = xi_x(i,j)*dphi_xi + et_x(i,j)*dphi_et
+          dphi_dy = xi_y(i,j)*dphi_xi + et_y(i,j)*dphi_et
+
+          ! Correct velocity
+          u(i,j,k) = us(i,j,k) - dt * dphi_dx
+          v(i,j,k) = vs(i,j,k) - dt * dphi_dy
+          w(i,j,k) = ws(i,j,k) - dt * dphi_dz
+
+          ! Update pressure
+          p(i,j,k) = p(i,j,k) + phi(i,j,k)
+
+        end do
+      end do
+    end do
+    !$acc end parallel loop
+
+    ! Re-apply BCs on corrected velocity
+    call apply_bcs(u, v, w, NI, NJ, NK, U0, V0)
 
     t = t + dt
 
