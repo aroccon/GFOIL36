@@ -98,14 +98,11 @@ program gfoil36
   real(8), parameter :: rka(3) = [ 0d0,        -17d0/60d0, -5d0/12d0 ]
   real(8), parameter :: rkb(3) = [ 8d0/15d0,    5d0/12d0,   3d0/4d0  ]
   double precision, allocatable :: xg(:,:), yg(:,:)
-  double precision, allocatable :: xi_x(:,:), xi_y(:,:)   ! d(xi)/dx,  d(xi)/dy
-  double precision, allocatable :: et_x(:,:), et_y(:,:)   ! d(eta)/dx, d(eta)/dy
-  double precision, allocatable :: jac(:,:)                ! Jacobian J = x_xi*y_et - x_et*y_xi
-  double precision, allocatable :: g11(:,:)                ! xi_x^2  + xi_y^2
-  double precision, allocatable :: g22(:,:)                ! et_x^2  + et_y^2
-  double precision, allocatable :: g12(:,:)                ! xi_x*et_x + xi_y*et_y
-  double precision, allocatable :: dxi(:,:)                ! physical xi  cell spacing
-  double precision, allocatable :: det(:,:)                ! physical eta cell spacing
+  double precision, allocatable :: xi_x(:,:), xi_y(:,:)               ! d(xi)/dx,  d(xi)/dy
+  double precision, allocatable :: et_x(:,:), et_y(:,:)               ! d(eta)/dx, d(eta)/dy
+  double precision, allocatable :: jac(:,:)                           ! Jacobian J = x_xi*y_et - x_et*y_xi
+  double precision, allocatable :: g11(:,:), g22(:,:), g12(:,:)       ! xi_x^2  + xi_y^2 ---  et_x^2  + et_y^2 -- xi_x*et_x + xi_y*et_y
+  double precision, allocatable :: dxi(:,:),det(:,:)                  ! physical xi  cell spacing and physical eta cell spacing
   double precision, allocatable :: u(:,:,:), v(:,:,:), w(:,:,:)
   double precision, allocatable :: p(:,:,:)
   double precision, allocatable :: ru(:,:,:), rv(:,:,:), rw(:,:,:)
@@ -127,7 +124,6 @@ program gfoil36
   ! Pressure gradient components
   double precision :: dp_dx, dp_dy, dp_dz, dphi_xi, dphi_et, dphi_dz, dphi_dx, dphi_dy, dmin
  
-
   ! allocate arrays
   allocate( xg(nx,ny), yg(nx,ny) )
   allocate( xi_x(nx,ny), xi_y(nx,ny) )
@@ -137,36 +133,28 @@ program gfoil36
   allocate( dxi(nx,ny), det(nx,ny) )
   allocate( u(nx,ny,nz), v(nx,ny,nz), w(nx,ny,nz) )
   allocate( p(nx,ny,nz) )
-  allocate( ru(NI,NJ,NK), rv(NI,NJ,NK), rw(NI,NJ,NK) )
+  allocate( ru(nx,ny,nz), rv(nx,ny,nz), rw(nx,ny,nz) )
   allocate( us(nx,ny,nz), vs(nx,ny,nz), ws(nx,ny,nz) )
   allocate( phi(nx,ny,nz), div(nx,ny,nz) )
 
-  !===========================================================================
   ! 1. PLACEHOLDER GRID  (uniform Cartesian — replace with Construct2D reader)
-  !    This makes the code testable on a channel flow immediately.
-  !    At AoA=0 on a Cartesian grid: xi_x=1/dx, et_y=1/dy, g12=0 exactly.
-  !===========================================================================
+  ! This makes the code testable on a channel flow immediately, at AoA=0 on a Cartesian grid: xi_x=1/dx, et_y=1/dy, g12=0 exactly.
   block
     real(8) :: dx_c, dy_c
     integer :: ii, jj
-    dx_c = 1d0 / dble(NI)
-    dy_c = 1d0 / dble(NJ)
-    do ii = 1, NI
-      do jj = 1, NJ
+    dx_c = 1d0 / dble(nx)
+    dy_c = 1d0 / dble(ny)
+    do ii = 1, nx
+      do jj = 1, ny
         xg(ii,jj) = (dble(ii) - 0.5d0) * dx_c
         yg(ii,jj) = (dble(jj) - 0.5d0) * dy_c
       end do
     end do
   end block
 
-  !===========================================================================
   ! 2. COMPUTE METRICS FROM x(i,j), y(i,j)
-  !    Central differences everywhere, one-sided at boundaries.
-  !    All 2D loops — done once at startup.
-  !===========================================================================
-  do i = 1, NI
-    do j = 1, NJ
-
+  do i = 1, nx
+    do j = 1, ny
       ! d/dxi — central, one-sided at i=1 and i=NI
       if (i == 1) then
         x_xi = xg(2,j)  - xg(1,j)
@@ -178,7 +166,6 @@ program gfoil36
         x_xi = (xg(i+1,j) - xg(i-1,j)) * 0.5d0
         y_xi = (yg(i+1,j) - yg(i-1,j)) * 0.5d0
       end if
-
       ! d/deta — central, one-sided at j=1 and j=NJ
       if (j == 1) then
         x_et = xg(i,2)  - xg(i,1)
@@ -190,36 +177,24 @@ program gfoil36
         x_et = (xg(i,j+1) - xg(i,j-1)) * 0.5d0
         y_et = (yg(i,j+1) - yg(i,j-1)) * 0.5d0
       end if
-
       ! Jacobian
       jac_loc   = x_xi * y_et - x_et * y_xi
       jac(i,j)  = jac_loc
-
       ! Inverse metrics
       xi_x(i,j) =  y_et   / jac_loc
       xi_y(i,j) = -x_et   / jac_loc
       et_x(i,j) = -y_xi   / jac_loc
       et_y(i,j) =  x_xi   / jac_loc
-
       ! Contravariant metric tensor
       g11(i,j)  = xi_x(i,j)**2 + xi_y(i,j)**2
       g22(i,j)  = et_x(i,j)**2 + et_y(i,j)**2
       g12(i,j)  = xi_x(i,j)*et_x(i,j) + xi_y(i,j)*et_y(i,j)
-
       ! Physical cell spacings (arc length)
       dxi(i,j)  = sqrt(x_xi**2 + y_xi**2)
       det(i,j)  = sqrt(x_et**2 + y_et**2)
-
     end do
   end do
 
-  ! 3. TIMESTEP
-  !    CFL-limited (ILES: diffusion limit relaxed by implicit numerical diss.)
-  dmin = minval(det(1:NI, 1))   ! smallest first cell height at wall
-  dt   = 0.4d0 * dmin / 2d0    ! safety 0.4, Umax ~ 2
-
-  write(*,'(A,ES10.3)') '  dt = ', dt
-  write(*,'(A,I0,A,I0,A,I0)') '  Grid: ', nx,' x ',ny,' x ',nz
 
   ! 4. initialize flow field (freestream + tiny random perturbation)
   call random_seed()
@@ -233,7 +208,7 @@ program gfoil36
           !call random_number(noise)
           v(i,j,k) = V0 !+ (noise - 0.5d0) * 1d-3
           !call random_number(noise)
-          w(i,j,k) =      (noise - 0.5d0) * 1d-3
+          w(i,j,k) =   !   (noise - 0.5d0) * 1d-3
           p(i,j,k) = 0d0
           ru(i,j,k) = 0d0
           rv(i,j,k) = 0d0
@@ -241,17 +216,17 @@ program gfoil36
         end do
       end do
     end do
-
+  end block
 
 
   ! start temporal loop
-  do step = 1, NSTEPS
+  do step = 1, nsteps
     ! start RK3 substeps, projection 
     ! compute rhs = - advection + nu * diffusion
     ! advection: 3rd-order upwind in xi and eta, 2nd-order central in z
     ! diffusion:  2nd-order central with metric tensor
     do stage = 1, 3
-      do k = 1, nx
+      do k = 1, nz
         do j = 2, nj-1
           do i = 2, nx-1
             ! Local spacings
@@ -342,7 +317,7 @@ program gfoil36
       !$acc end parallel loop
 
       ! 5b. Apply BCs on u*, v*, w*
-      call apply_bcs(us, vs, ws, NI, NJ, NK, U0, V0)
+      call apply_bcs(us, vs, ws, nx, ny, nz, U0, V0)
 
     end do  ! rk loop
 
@@ -355,32 +330,26 @@ program gfoil36
     !--- Rhie-Chow divergence ---
     call rhie_chow_div(us, vs, ws, p, phi, div, &
                        xi_x, xi_y, et_x, et_y, jac, g11, g22, g12, &
-                       dxi, det, NI, NJ, NK, DZI, dt)
+                       dxi, det, nx, ny, nz, DZI, dt)
 
     !--- Poisson solve (placeholder) ---
-    call poisson_solve(phi, div, NI, NJ, NK, DZ)
+    call poisson_solve(phi, div, nx, ny, nz, DZ)
 
     !--- Velocity correction ---
-    !$acc parallel loop collapse(3) independent &
-    !$acc&   private(dphi_xi, dphi_et, dphi_dz, dphi_dx, dphi_dy)
-    do k = 1, NK
-      do j = 2, NJ-1
-        do i = 2, NI-1
-
+    do k = 1, nz
+      do j = 2, ny-1
+        do i = 2, nx-1
           ! Pressure correction gradient in computational space
           dphi_xi = (phi(i+1,j,k) - phi(i-1,j,k)) / (2d0 * dxi(i,j))
           dphi_et = (phi(i,j+1,k) - phi(i,j-1,k)) / (2d0 * det(i,j))
           dphi_dz = (phi(i,j,kp1(k)) - phi(i,j,km1(k))) * 0.5d0 * DZI
-
           ! Transform to physical space
           dphi_dx = xi_x(i,j)*dphi_xi + et_x(i,j)*dphi_et
           dphi_dy = xi_y(i,j)*dphi_xi + et_y(i,j)*dphi_et
-
           ! Correct velocity
           u(i,j,k) = us(i,j,k) - dt * dphi_dx
           v(i,j,k) = vs(i,j,k) - dt * dphi_dy
           w(i,j,k) = ws(i,j,k) - dt * dphi_dz
-
           ! Update pressure
           p(i,j,k) = p(i,j,k) + phi(i,j,k)
 
@@ -390,22 +359,19 @@ program gfoil36
     !$acc end parallel loop
 
     ! Re-apply BCs on corrected velocity
-    call apply_bcs(u, v, w, NI, NJ, NK, U0, V0)
+    call apply_bcs(u, v, w, nx, ny, nz, U0, V0)
 
     t = t + dt
-
-    if (mod(step, NPRINT) == 0) then
-      write(*,'(A,I7,A,F10.4,A,ES10.3)') &
-            '  step=', step, '  t=', t, &
-            '  |u|max=', maxval(abs(u))
-    end if
-
   end do  ! time loop
 
   write(*,'(A)') '  Done.'
 
-contains
 
+
+
+
+
+contains
   !==========================================================================
   ! Periodic index helpers (inline, no overhead)
   !==========================================================================
