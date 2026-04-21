@@ -4,12 +4,12 @@
 
 program gfoil36
   implicit none
-  integer, parameter :: nx = 512
-  integer, parameter :: ny = 256
-  integer, parameter :: nz = 128
-  real(8), parameter :: re   = 50000d0
-  real(8), parameter :: aoa  = 5d0
-  real(8), parameter :: lz   = 0.2d0
+  integer, parameter :: nx     = 97       ! match Construct2D imax
+  integer, parameter :: ny     = 15       ! match Construct2D jmax
+  integer, parameter :: nz     = 4        ! spanwise (keep small for debug)
+  real(8), parameter :: re     = 50000d0
+  real(8), parameter :: aoa    = 5d0
+  real(8), parameter :: lz     = 0.2d0
   integer, parameter :: nsteps = 100
   integer, parameter :: nprint = 10
   real(8), parameter :: PI      = acos(-1d0)
@@ -57,19 +57,14 @@ program gfoil36
   allocate( us(nx,ny,nz), vs(nx,ny,nz), ws(nx,ny,nz) )
   allocate( phi(nx,ny,nz), div(nx,ny,nz) )
 
-  block
-    real(8) :: dx_c, dy_c
-    integer :: ii, jj
-    dx_c = 1d0 / dble(nx)
-    dy_c = 1d0 / dble(ny)
-    do ii = 1, nx
-      do jj = 1, ny
-        xg(ii,jj) = (dble(ii) - 0.5d0) * dx_c
-        yg(ii,jj) = (dble(jj) - 0.5d0) * dy_c
-      end do
-    end do
-  end block
+  !==========================================================================
+  ! READ PLOT3D GRID
+  !==========================================================================
+  call read_p3d('grid.xyz', xg, yg, nx, ny)
 
+  !==========================================================================
+  ! COMPUTE METRICS
+  !==========================================================================
   do i = 1, nx
     do j = 1, ny
       if (i == 1) then
@@ -99,6 +94,11 @@ program gfoil36
       det(i,j)  = sqrt(x_et**2 + y_et**2)
     end do
   end do
+
+  !==========================================================================
+  ! GRID VALIDATION
+  !==========================================================================
+  call validate_grid(xg, yg, jac, dxi, det, nx, ny)
 
   dmin = minval(dxi(:,:))
   dt   = 0.4d0 * dmin / 2d0
@@ -131,14 +131,10 @@ program gfoil36
   do step = 1, nsteps
     do stage = 1, 3
       do k = 1, nz
-        do j = 2, ny-1    ! full domain interior
-          do i = 2, nx-1  ! diffusion always valid (needs ±1 only)
-
+        do j = 2, ny-1
+          do i = 2, nx-1
             U_con = xi_x(i,j)*u(i,j,k) + xi_y(i,j)*v(i,j,k)
             V_con = et_x(i,j)*u(i,j,k) + et_y(i,j)*v(i,j,k)
-
-            !--- Convection of u ---
-            ! xi: 3rd-order upwind in interior, 2nd-order central at i=2 and i=nx-1
             if (i >= 3 .and. i <= nx-2) then
               if (U_con >= 0d0) then
                 conv_u=U_con*(2d0*u(i+1,j,k)-6d0*u(i,j,k)+3d0*u(i-1,j,k)+u(i-2,j,k))/(6d0*dxi(i,j))
@@ -148,7 +144,6 @@ program gfoil36
             else
               conv_u = U_con*(u(i+1,j,k)-u(i-1,j,k))/(2d0*dxi(i,j))
             end if
-            ! eta: 3rd-order upwind in interior, 2nd-order central at j=2 and j=ny-1
             if (j >= 3 .and. j <= ny-2) then
               if (V_con >= 0d0) then
                 conv_u=conv_u+V_con*(2d0*u(i,j+1,k)-6d0*u(i,j,k)+3d0*u(i,j-1,k)+u(i,j-2,k))/(6d0*det(i,j))
@@ -158,10 +153,7 @@ program gfoil36
             else
               conv_u = conv_u + V_con*(u(i,j+1,k)-u(i,j-1,k))/(2d0*det(i,j))
             end if
-            ! z: always 2nd-order central (periodic, no boundary issue)
             conv_u = conv_u + w(i,j,k)*(u(i,j,kp1(k))-u(i,j,km1(k)))*0.5d0*dzi
-
-            !--- Convection of v ---
             if (i >= 3 .and. i <= nx-2) then
               if (U_con >= 0d0) then
                 conv_v=U_con*(2d0*v(i+1,j,k)-6d0*v(i,j,k)+3d0*v(i-1,j,k)+v(i-2,j,k))/(6d0*dxi(i,j))
@@ -181,8 +173,6 @@ program gfoil36
               conv_v = conv_v + V_con*(v(i,j+1,k)-v(i,j-1,k))/(2d0*det(i,j))
             end if
             conv_v = conv_v + w(i,j,k)*(v(i,j,kp1(k))-v(i,j,km1(k)))*0.5d0*dzi
-
-            !--- Convection of w ---
             if (i >= 3 .and. i <= nx-2) then
               if (U_con >= 0d0) then
                 conv_w=U_con*(2d0*w(i+1,j,k)-6d0*w(i,j,k)+3d0*w(i-1,j,k)+w(i-2,j,k))/(6d0*dxi(i,j))
@@ -202,22 +192,18 @@ program gfoil36
               conv_w = conv_w + V_con*(w(i,j+1,k)-w(i,j-1,k))/(2d0*det(i,j))
             end if
             conv_w = conv_w + w(i,j,k)*(w(i,j,kp1(k))-w(i,j,km1(k)))*0.5d0*dzi
-            !--- Explicit diffusion: xi + z + g12 cross (eta handled implicitly)
             diff_xi_u = g11(i,j)*(u(i+1,j,k)-2d0*u(i,j,k)+u(i-1,j,k))/dxi(i,j)**2
             diff_xi_v = g11(i,j)*(v(i+1,j,k)-2d0*v(i,j,k)+v(i-1,j,k))/dxi(i,j)**2
             diff_xi_w = g11(i,j)*(w(i+1,j,k)-2d0*w(i,j,k)+w(i-1,j,k))/dxi(i,j)**2
             diff_z_u  = (u(i,j,kp1(k))-2d0*u(i,j,k)+u(i,j,km1(k)))*ddzi
             diff_z_v  = (v(i,j,kp1(k))-2d0*v(i,j,k)+v(i,j,km1(k)))*ddzi
             diff_z_w  = (w(i,j,kp1(k))-2d0*w(i,j,k)+w(i,j,km1(k)))*ddzi
-            ! g12 cross term: needs ±1 in both i and j — valid at i=2..nx-1, j=2..ny-1
             cross_u=2d0*g12(i,j)*(u(i+1,j+1,k)-u(i+1,j-1,k)-u(i-1,j+1,k)+u(i-1,j-1,k))/(4d0*dxi(i,j)*det(i,j))
             cross_v=2d0*g12(i,j)*(v(i+1,j+1,k)-v(i+1,j-1,k)-v(i-1,j+1,k)+v(i-1,j-1,k))/(4d0*dxi(i,j)*det(i,j))
             cross_w=2d0*g12(i,j)*(w(i+1,j+1,k)-w(i+1,j-1,k)-w(i-1,j+1,k)+w(i-1,j-1,k))/(4d0*dxi(i,j)*det(i,j))
-
             rhs_u = -conv_u + nu*(diff_xi_u + diff_z_u + cross_u)
             rhs_v = -conv_v + nu*(diff_xi_v + diff_z_v + cross_v)
             rhs_w = -conv_w + nu*(diff_xi_w + diff_z_w + cross_w)
-
             ru(i,j,k) = rka(stage)*ru(i,j,k) + rhs_u
             rv(i,j,k) = rka(stage)*rv(i,j,k) + rhs_v
             rw(i,j,k) = rka(stage)*rw(i,j,k) + rhs_w
@@ -227,7 +213,6 @@ program gfoil36
           end do
         end do
       end do
-      !$acc end parallel loop
       call implicit_eta(us, u, g22, det, nx, ny, nz, nu, dt, rkb(stage), u0)
       call implicit_eta(vs, v, g22, det, nx, ny, nz, nu, dt, rkb(stage), v0)
       call implicit_eta(ws, w, g22, det, nx, ny, nz, nu, dt, rkb(stage), 0d0)
@@ -265,6 +250,111 @@ program gfoil36
 
 contains
 
+  ! READ_P3D — Plot3D formatted (ASCII) grid reader
+  !  Reads Construct2D formatted double-precision output:
+  !    Line 1:  nblocks
+  !    Line 2:  ni  nj  nk
+  !    Rest:    all x values, then all y values, then all z values
+  !             i is the fastest index (inner loop in Construct2D write)
+  !
+  !  List-directed read (*) handles numbers spread across multiple lines.
+  subroutine read_p3d(fname, xg, yg, ni, nj)
+    character(len=*), intent(in)  :: fname
+    integer,          intent(in)  :: ni, nj
+    real(8),          intent(out) :: xg(ni,nj), yg(ni,nj)
+
+    integer :: ios, nblocks, ni_f, nj_f, nk_f, ii, jj
+    real(8) :: zdum
+
+    open(10, file=trim(fname), form='formatted', status='old', &
+         action='read', iostat=ios)
+    if (ios /= 0) then
+      write(*,'(A,A)') '  ERROR: cannot open ', trim(fname); stop
+    end if
+
+    ! nblocks
+    read(10, *, iostat=ios) nblocks
+    if (ios /= 0 .or. nblocks /= 1) then
+      write(*,'(A,I0)') '  ERROR: expected nblocks=1, got ', nblocks; stop
+    end if
+
+    ! dimensions
+    read(10, *, iostat=ios) ni_f, nj_f, nk_f
+    if (ios /= 0) then
+      write(*,'(A)') '  ERROR: cannot read grid dimensions'; stop
+    end if
+    write(*,'(A,3I6)') '  File dims (i,j,k): ', ni_f, nj_f, nk_f
+    if (ni_f /= ni .or. nj_f /= nj) then
+      write(*,'(A,2I5)') '  ERROR: expected nx x ny = ', ni, nj
+      write(*,'(A,2I5)') '         got              = ', ni_f, nj_f
+      write(*,'(A)')     '  Update nx and ny at top of program.'; stop
+    end if
+
+    ! x coordinates (i fastest)
+    read(10, *, iostat=ios) ((xg(ii,jj), ii=1,ni), jj=1,nj)
+    if (ios /= 0) then
+      write(*,'(A)') '  ERROR: failed reading x coords'; stop
+    end if
+
+    ! y coordinates
+    read(10, *, iostat=ios) ((yg(ii,jj), ii=1,ni), jj=1,nj)
+    if (ios /= 0) then
+      write(*,'(A)') '  ERROR: failed reading y coords'; stop
+    end if
+
+    close(10)
+    write(*,'(A,I0,A,I0)') '  Grid read OK: ', ni,' x ',nj
+    write(*,'(A,2F10.5)')  '  x range: ', minval(xg), maxval(xg)
+    write(*,'(A,2F10.5)')  '  y range: ', minval(yg), maxval(yg)
+
+  end subroutine read_p3d
+
+  !==========================================================================
+  ! VALIDATE_GRID — sanity checks after reading
+  !==========================================================================
+  subroutine validate_grid(xg, yg, jac, dxi, det, ni, nj)
+    integer, intent(in) :: ni, nj
+    real(8), intent(in) :: xg(ni,nj), yg(ni,nj)
+    real(8), intent(in) :: jac(ni,nj), dxi(ni,nj), det(ni,nj)
+    real(8) :: skew, skew_max, gap_x, gap_y
+    integer :: i, j, nbad
+
+    write(*,'(A)') '  ---- Grid validation ----'
+
+    ! Check Jacobian sign
+    nbad = count(jac <= 0d0)
+    if (nbad > 0) then
+      write(*,'(A,I0,A)') '  *** ERROR: ', nbad, ' cells with J<=0 (folded grid) ***'
+    else
+      write(*,'(A,ES10.3,A,ES10.3)') '  Jacobian: min=', minval(jac), '  max=', maxval(jac)
+    end if
+
+    ! Wake cut gap: x(i=1,j) should equal x(i=ni,j)
+    gap_x = 0d0;  gap_y = 0d0
+    do j = 1, nj
+      gap_x = max(gap_x, abs(xg(1,j) - xg(ni,j)))
+      gap_y = max(gap_y, abs(yg(1,j) - yg(ni,j)))
+    end do
+    write(*,'(A,ES10.3,A,ES10.3)') '  Wake cut gap: x=', gap_x, '  y=', gap_y
+    if (gap_x > 1d-6 .or. gap_y > 1d-6) &
+      write(*,'(A)') '  WARNING: wake cut not closed — check Construct2D topology'
+
+    ! Wall point (j=1): should be on airfoil surface
+    write(*,'(A,2F10.5)') '  Wall i=ni/4 (near LE): x,y = ', &
+          xg(ni/4, 1), yg(ni/4, 1)
+
+    ! First cell height
+    write(*,'(A,ES10.3,A,ES10.3)') '  dy1 (wall): min=', minval(det(:,1)), &
+          '  max=', maxval(det(:,1))
+
+    write(*,'(A)') '  -------------------------'
+
+  end subroutine validate_grid
+
+
+
+
+  ! PERIODIC INDEX HELPERS
   pure integer function kp1(k)
     integer, intent(in) :: k
     kp1 = mod(k, nz) + 1
@@ -275,6 +365,10 @@ contains
     km1 = mod(k + nz - 2, nz) + 1
   end function
 
+
+
+
+  ! IMPLICIT ETA DIFFUSION (Thomas algorithm)
   subroutine implicit_eta(us_out, u_old, g22, det, ni, nj, nk, nu, dt, rkb, far_val)
     integer, intent(in)    :: ni, nj, nk
     real(8), intent(in)    :: nu, dt, rkb, far_val
@@ -284,7 +378,6 @@ contains
     integer :: i, j, k
     real(8) :: alpha, fac
     real(8) :: lo(nj), diag(nj), up(nj), rr(nj), sol(nj)
-
     do k = 1, nk
       do i = 1, ni
         do j = 2, nj-1
@@ -295,17 +388,13 @@ contains
           rr(j)   = us_out(i,j,k) &
                   + alpha*(u_old(i,j+1,k) - 2d0*u_old(i,j,k) + u_old(i,j-1,k))
         end do
-        ! Wall BC j=1: no-slip
-        diag(1) = 1d0;  up(1) = 0d0;  lo(1) = 0d0;  rr(1) = 0d0
-        ! Far-field BC j=nj: freestream
+        diag(1)  = 1d0;  up(1)  = 0d0;  lo(1)  = 0d0;  rr(1)  = 0d0
         diag(nj) = 1d0;  lo(nj) = 0d0;  up(nj) = 0d0;  rr(nj) = far_val
-        ! Thomas forward sweep
         do j = 2, nj
           fac     = lo(j) / diag(j-1)
           diag(j) = diag(j) - fac * up(j-1)
           rr(j)   = rr(j)   - fac * rr(j-1)
         end do
-        ! Back substitution
         sol(nj) = rr(nj) / diag(nj)
         do j = nj-1, 1, -1
           sol(j) = (rr(j) - up(j)*sol(j+1)) / diag(j)
@@ -317,6 +406,10 @@ contains
     end do
   end subroutine implicit_eta
 
+
+
+
+  ! BOUNDARY CONDITIONS
   subroutine apply_bcs(uu, vv, ww, ni, nj, nk, u0, v0)
     integer, intent(in)    :: ni, nj, nk
     real(8), intent(in)    :: u0, v0
@@ -324,18 +417,19 @@ contains
     integer :: i, j, k
     do k = 1, nk
       do i = 1, ni
-        uu(i,1,k)  = 0d0;  vv(i,1,k)  = 0d0;  ww(i,1,k)  = 0d0
-        uu(i,nj,k) = u0;   vv(i,nj,k) = v0;   ww(i,nj,k) = 0d0
+        uu(i,1,k)  = 0d0;  vv(i,1,k)  = 0d0;  ww(i,1,k)  = 0d0   ! wall
+        uu(i,nj,k) = u0;   vv(i,nj,k) = v0;   ww(i,nj,k) = 0d0   ! far field
       end do
     end do
     do k = 1, nk
       do j = 1, nj
-        uu(1,j,k) = u0;  vv(1,j,k) = v0;  ww(1,j,k) = 0d0
-        uu(ni,j,k) = uu(ni-1,j,k)
+        uu(1,j,k)  = u0;  vv(1,j,k)  = v0;  ww(1,j,k)  = 0d0     ! inlet
+        uu(ni,j,k) = uu(ni-1,j,k)                                  ! outlet
         vv(ni,j,k) = vv(ni-1,j,k)
         ww(ni,j,k) = ww(ni-1,j,k)
       end do
     end do
+    ! Wake cut: average i=1 and i=ni (same physical line on C-grid)
     do k = 1, nk
       do j = 1, nj
         uu(1,j,k)  = 0.5d0*(uu(1,j,k) + uu(ni,j,k))
@@ -348,6 +442,10 @@ contains
     end do
   end subroutine apply_bcs
 
+
+
+
+  ! RHIE-CHOW DIVERGENCE
   subroutine rhie_chow_div(uu, vv, ww, pp, phi, dv, &
                            xi_x, xi_y, et_x, et_y, jc, g11, g22, g12, &
                            dxi, det, ni, nj, nk, dzi, dt)
@@ -394,6 +492,9 @@ contains
     end do
   end subroutine rhie_chow_div
 
+  !==========================================================================
+  ! POISSON SOLVE — PLACEHOLDER
+  !==========================================================================
   subroutine poisson_solve(phi, rhs, ni, nj, nk, dz)
     integer, intent(in)    :: ni, nj, nk
     real(8), intent(in)    :: dz

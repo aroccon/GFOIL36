@@ -10,3 +10,7 @@ The code is meant for teachig purposes and is currently under development (15/04
 
 ![Test](val.png)
 
+# C-grid generation 
+For the generation of the C-grid, two methods are available:
+- Construct2D, see the doc inside the folded, it has many parameters to stretch or not the grid.
+- simplecgrid, script 
