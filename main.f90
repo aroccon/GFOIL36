@@ -4,8 +4,8 @@
 
 program gfoil36
   implicit none
-  integer, parameter :: nx     = 147       ! match Construct2D imax
-  integer, parameter :: ny     = 15       ! match Construct2D jmax
+  integer, parameter :: nx     = 97      ! match cgrid_naca4412.p3d
+  integer, parameter :: ny     = 15       ! match cgrid_naca4412.p3d
   integer, parameter :: nz     = 4        ! spanwise (keep small for debug)
   real(8), parameter :: re     = 50000d0
   real(8), parameter :: aoa    = 5d0
@@ -60,7 +60,7 @@ program gfoil36
   !==========================================================================
   ! READ PLOT3D GRID
   !==========================================================================
-  call read_p3d('cmesh.p3d', xg, yg, nx, ny)
+  call read_p3d('cgrid_naca0012.p3d', xg, yg, nx, ny)
 
   !==========================================================================
   ! COMPUTE METRICS
@@ -321,15 +321,15 @@ contains
       write(*,'(A,ES10.3,A,ES10.3)') '  Jacobian: min=', minval(jac), '  max=', maxval(jac)
     end if
 
-    ! Wake cut gap: x(i=1,j) should equal x(i=ni,j)
-    gap_x = 0d0;  gap_y = 0d0
-    do j = 1, nj
-      gap_x = max(gap_x, abs(xg(1,j) - xg(ni,j)))
-      gap_y = max(gap_y, abs(yg(1,j) - yg(ni,j)))
-    end do
-    write(*,'(A,ES10.3,A,ES10.3)') '  Wake cut gap: x=', gap_x, '  y=', gap_y
+    ! Wake cut gap: on a C-grid, i=1 and i=ni coincide only at j=1
+    ! (they're the upper/lower downstream outlets; both sit at the same
+    ! wake-outlet point on the cut line y=0). At j>1 they diverge toward
+    ! the top/bottom far-field boundaries, so it's wrong to compare them.
+    gap_x = abs(xg(1,1) - xg(ni,1))
+    gap_y = abs(yg(1,1) - yg(ni,1))
+    write(*,'(A,ES10.3,A,ES10.3)') '  Wake cut gap (j=1): x=', gap_x, '  y=', gap_y
     if (gap_x > 1d-6 .or. gap_y > 1d-6) &
-      write(*,'(A)') '  WARNING: wake cut not closed — check Construct2D topology'
+      write(*,'(A)') '  WARNING: wake cut not closed at j=1'
 
     ! Wall point (j=1): should be on airfoil surface
     write(*,'(A,2F10.5)') '  Wall i=ni/4 (near LE): x,y = ', &
@@ -402,6 +402,14 @@ contains
 
 
   ! BOUNDARY CONDITIONS
+  !
+  ! C-grid layout (after orientation fix in cgrid_airfoil.py):
+  !    j=1    : airfoil wall + wake-cut line (y=0 between TE and x_wake)
+  !    j=ny   : far field (top line, front semicircle, bottom line)
+  !    i=1    : lower downstream outlet (below wake cut, x=x_wake)
+  !    i=nx   : upper downstream outlet (above wake cut, x=x_wake)
+  ! The free-stream inflow is at j=ny (far-field arc); there is no "inlet"
+  ! face in i. i=1 and i=nx are both outlets (zero-gradient in xi).
   subroutine apply_bcs(uu, vv, ww, ni, nj, nk, u0, v0)
     integer, intent(in)    :: ni, nj, nk
     real(8), intent(in)    :: u0, v0
@@ -409,28 +417,34 @@ contains
     integer :: i, j, k
     do k = 1, nk
       do i = 1, ni
-        uu(i,1,k)  = 0d0;  vv(i,1,k)  = 0d0;  ww(i,1,k)  = 0d0   ! wall
+        ! NOTE: this applies no-slip to the whole j=1 line, including the
+        ! wake-cut portion (i in [1, n_wake] and [ni-n_wake+1, ni]). On a
+        ! strict C-grid that portion should be a free-slip / wake cut, not
+        ! a wall. The wake-cut averaging block below partially compensates
+        ! by tying i=1 and i=ni together at j=1. If you need a physically
+        ! correct free wake, restrict this loop to the airfoil index range.
+        uu(i,1,k)  = 0d0;  vv(i,1,k)  = 0d0;  ww(i,1,k)  = 0d0   ! wall / wake cut
         uu(i,nj,k) = u0;   vv(i,nj,k) = v0;   ww(i,nj,k) = 0d0   ! far field
       end do
     end do
+    ! Downstream outlets on both i=1 and i=nx faces: zero-gradient in xi
     do k = 1, nk
       do j = 1, nj
-        uu(1,j,k)  = u0;  vv(1,j,k)  = v0;  ww(1,j,k)  = 0d0     ! inlet
-        uu(ni,j,k) = uu(ni-1,j,k)                                  ! outlet
-        vv(ni,j,k) = vv(ni-1,j,k)
-        ww(ni,j,k) = ww(ni-1,j,k)
+        uu(1,j,k)  = uu(2,j,k);      vv(1,j,k)  = vv(2,j,k);      ww(1,j,k)  = ww(2,j,k)
+        uu(ni,j,k) = uu(ni-1,j,k);   vv(ni,j,k) = vv(ni-1,j,k);   ww(ni,j,k) = ww(ni-1,j,k)
       end do
     end do
-    ! Wake cut: average i=1 and i=ni (same physical line on C-grid)
+    ! Wake cut: i=1 and i=ni coincide ONLY at j=1 (the wake line y=0 between
+    ! the TE and the downstream outlet). Average them there so the two sides
+    ! of the cut see the same value. At j>1 the two i-edges are the separate
+    ! top/bottom downstream outlets and must NOT be averaged together.
     do k = 1, nk
-      do j = 1, nj
-        uu(1,j,k)  = 0.5d0*(uu(1,j,k) + uu(ni,j,k))
-        vv(1,j,k)  = 0.5d0*(vv(1,j,k) + vv(ni,j,k))
-        ww(1,j,k)  = 0.5d0*(ww(1,j,k) + ww(ni,j,k))
-        uu(ni,j,k) = uu(1,j,k)
-        vv(ni,j,k) = vv(1,j,k)
-        ww(ni,j,k) = ww(1,j,k)
-      end do
+      uu(1,1,k) = 0.5d0*(uu(1,1,k) + uu(ni,1,k))
+      vv(1,1,k) = 0.5d0*(vv(1,1,k) + vv(ni,1,k))
+      ww(1,1,k) = 0.5d0*(ww(1,1,k) + ww(ni,1,k))
+      uu(ni,1,k) = uu(1,1,k)
+      vv(ni,1,k) = vv(1,1,k)
+      ww(ni,1,k) = ww(1,1,k)
     end do
   end subroutine apply_bcs
 

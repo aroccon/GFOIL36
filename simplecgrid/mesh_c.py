@@ -1,13 +1,3 @@
-"""
-C-grid mesh generation around a NACA 4-digit airfoil.
-
-The C-grid is built from two concatenated boundaries (inner = airfoil + wake
-cut, outer = semicircle + straight downstream lines) which are then connected
-by a stretched transfinite interpolation in the normal direction.
-
-Reference: https://alpynepyano.github.io/healthyNumerics/posts/cfd-03-grids-for-airfoils.html
-"""
-
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.colors as mclr
@@ -87,7 +77,7 @@ def _resample_curve(x, y, n):
     return np.interp(s_new, s, x), np.interp(s_new, s, y)
 
 
-def build_cgrid(px, py, R=1.25, x_wake=2.0, n_wake=30, n_normal=25):
+def build_cgrid(px, py, R=1.25, x_wake=2.0, n_wake=20, n_normal=15):
     """
     Build a C-grid around the airfoil.
 
@@ -165,11 +155,19 @@ def write_plot3d(filename, xk, yk):
         y[0,0] y[1,0] ... y[nx-1,0]  y[0,1] ...  (nx*ny values, i fastest)
 
     One value per line, %18.8E, matching the convention of the reference file.
+
+    NOTE on orientation: the i-direction is reversed relative to how
+    build_cgrid() constructs the curve. build_cgrid() walks the C clockwise
+    (upper-wake-outlet -> TE -> LE -> TE -> lower-wake-outlet), which gives a
+    *negative* Jacobian x_xi*y_et - x_et*y_xi when eta points outward from the
+    wall. Reversing i here produces the standard right-handed orientation
+    (positive Jacobian) that solvers expect.
     """
+    xk = xk[::-1, :]
+    yk = yk[::-1, :]
     nx, ny = xk.shape
     with open(filename, "w") as f:
         f.write(f"{nx:12d}{ny:12d}\n")
-        # Fortran-order flatten: i varies fastest
         for v in xk.flatten(order="F"):
             f.write(f"{v:18.8E}\n")
         for v in yk.flatten(order="F"):
@@ -181,14 +179,14 @@ def write_plot3d(filename, xk, yk):
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     # airfoil
-    px, py = naca4("0012", n_points=60)
+    px, py = naca4("0012", n_points=30)
 
     # C-grid
     xk, yk, inner, outer = build_cgrid(
         px, py,
         R=1.25,        # far-field radius
         x_wake=2.0,    # downstream extent
-        n_wake=15,     # points along each wake cut
+        n_wake=20,     # points along each wake cut
         n_normal=15,   # points in wall-normal direction
     )
 
@@ -219,8 +217,14 @@ if __name__ == "__main__":
     print(f"Mesh shape: {xk.shape}")
 
     # Plot3D export
-    p3d_out = "cmesh.p3d"
+    p3d_out = "cgrid_naca0012.p3d"
     write_plot3d(p3d_out, xk, yk)
     print(f"Saved: {p3d_out}")
+    print()
+    print("=" * 52)
+    print(f"  For main.f90, set at the top of the program:")
+    print(f"    integer, parameter :: nx = {xk.shape[0]}")
+    print(f"    integer, parameter :: ny = {xk.shape[1]}")
+    print("=" * 52)
 
     plt.show()
