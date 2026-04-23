@@ -60,7 +60,7 @@ program gfoil36
   !==========================================================================
   ! READ PLOT3D GRID
   !==========================================================================
-  call read_p3d('grid.xyz', xg, yg, nx, ny)
+  call read_p3d('cmesh.p3d', xg, yg, nx, ny)
 
   !==========================================================================
   ! COMPUTE METRICS
@@ -250,21 +250,17 @@ program gfoil36
 
 contains
 
-  ! READ_P3D — Plot3D formatted (ASCII) grid reader
-  !  Reads Construct2D formatted double-precision output:
-  !    Line 1:  nblocks
-  !    Line 2:  ni  nj  nk
-  !    Rest:    all x values, then all y values, then all z values
-  !             i is the fastest index (inner loop in Construct2D write)
-  !
-  !  List-directed read (*) handles numbers spread across multiple lines.
+    ! READ_P3D — Plot3D 2D single-block formatted (ASCII) grid reader
+  !  Construct2D 2D output layout:
+  !    Line 1:  ni  nj
+  !    Rest:    all x values, then all y values
+  !             i is the fastest index
   subroutine read_p3d(fname, xg, yg, ni, nj)
     character(len=*), intent(in)  :: fname
     integer,          intent(in)  :: ni, nj
     real(8),          intent(out) :: xg(ni,nj), yg(ni,nj)
 
-    integer :: ios, nblocks, ni_f, nj_f, nk_f, ii, jj
-    real(8) :: zdum
+    integer :: ios, ni_f, nj_f, ii, jj
 
     open(10, file=trim(fname), form='formatted', status='old', &
          action='read', iostat=ios)
@@ -272,18 +268,12 @@ contains
       write(*,'(A,A)') '  ERROR: cannot open ', trim(fname); stop
     end if
 
-    ! nblocks
-    read(10, *, iostat=ios) nblocks
-    if (ios /= 0 .or. nblocks /= 1) then
-      write(*,'(A,I0)') '  ERROR: expected nblocks=1, got ', nblocks; stop
-    end if
-
-    ! dimensions
-    read(10, *, iostat=ios) ni_f, nj_f, nk_f
+    ! dimensions (2D single-block: ni nj only)
+    read(10, *, iostat=ios) ni_f, nj_f
     if (ios /= 0) then
       write(*,'(A)') '  ERROR: cannot read grid dimensions'; stop
     end if
-    write(*,'(A,3I6)') '  File dims (i,j,k): ', ni_f, nj_f, nk_f
+    write(*,'(A,2I6)') '  File dims (i,j): ', ni_f, nj_f
     if (ni_f /= ni .or. nj_f /= nj) then
       write(*,'(A,2I5)') '  ERROR: expected nx x ny = ', ni, nj
       write(*,'(A,2I5)') '         got              = ', ni_f, nj_f
@@ -308,6 +298,8 @@ contains
     write(*,'(A,2F10.5)')  '  y range: ', minval(yg), maxval(yg)
 
   end subroutine read_p3d
+
+  
 
   !==========================================================================
   ! VALIDATE_GRID — sanity checks after reading
