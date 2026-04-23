@@ -4,7 +4,7 @@
 
 program gfoil36
   implicit none
-  integer, parameter :: nx     = 97       ! match Construct2D imax
+  integer, parameter :: nx     = 147       ! match Construct2D imax
   integer, parameter :: ny     = 15       ! match Construct2D jmax
   integer, parameter :: nz     = 4        ! spanwise (keep small for debug)
   real(8), parameter :: re     = 50000d0

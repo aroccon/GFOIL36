@@ -7,7 +7,7 @@ Profile is then extretued along the spanwise direction.
 The code is meant for teachig purposes and is currently under development (21/04/26).
 
 
-![Test](simplecgrid/cmesh.png)
+![Test](simplecgrid/cgrid_naca0012.png)
 
 # C-grid generation 
 For the generation of the C-grid, two methods are available:
@@ -19,8 +19,9 @@ For the generation of the C-grid, two methods are available:
 The follwoing features has bene implemented and tested:
 - Grid generation using simplecgrid ✅
 - Grid generation using Construct2D ✅
-- Read of P3D file
-- Check P3D file 
+- Read of P3D file ✅
+- Check P3D file ✅
+- Paraview of Grid ✅
 - Output of file solutions (structured grid + P3D?)
 - Diffusive terms (explicit)
 - Diffusive terms (impkicit)
